@@ -1,0 +1,1005 @@
+There are four different types of nodes (addresses, entities, intermediaries,
+and officers)
+
+
+addresses:       151054(according to excel) different addresses
+	         150820(according to julia)
+entities:        319150(according to excel) different entities
+	         319150(according to julia)
+intermediaries:  23636 (according to excel) different intermediaries
+		 23636 (according to julia)
+officers:        345594(according to excel) different officers
+		 345595(according to julia)
+
+**note- there is a descrepancy between the addresses reported by excel
+and julia, will need to look into it**
+
+
+when we identify them, we should use node id (as this is how to identify
+nodes). I feel that we should organize nodes by category, so have addresses,
+then entities, then intermediaries, the officers
+
+after creating the arrays, we will then construct a dictionary which maps
+node id to an "index" number (where the indices represents the virtual rows
+and columns of the sparse matrix). This will allow constant lookup of the 
+node id's which will speed up the process of creating the sparse matrix
+
+after reading the arrays and using them to construct the basic form of our
+matrix, we can reassign the variables holding the arrays in order to save
+memory. Then open relationship array to attempt to create a sparse matrix
+
+later on, when we trying to access information, we can use a cache like
+structure. 
+
+An example of how to do this is when we want to look up more information
+about an entry, we pull the entire array of the element after the entry
+and keep that in memory, if we want to reference another type of entry
+then we purge the cache and restart. **NOTE: could be really slow**
+
+
+CODE
+
+##########################################################################################
+#################################### Functions ###########################################
+##########################################################################################
+
+
+##We would want constant lookup. 
+
+##given the array, will determine the column in the array which contains the node id's,
+##used to speed up the function
+
+function determineColumn(x::Array)
+	length_value = size(x)[1]
+	search_index = findfirst(x,"node_id")
+	round(Int,search_index/length_value)+1
+end
+
+function determineColumn(x::Array, y)
+	length_value = size(x)[1]
+	search_index = findfirst(x,y)
+	round(Int, search_index/length_value)+1
+end
+
+##given an array of tuples (with id's of all nodes), will create a dictionary mapping each
+##id-number to the corresponding index. The first element in the tuple is the array while
+##the second element in the tuple is the column number
+
+##**depending on how Julia this could take extra space, depends on if pointers are used
+##when referring to tuples**
+
+function createDict(info::Array)
+	forward_dict = Dict{Int64, Int64}()
+	backward_dict = Dict{Int64, Int64}()
+	index = 1
+	for tuple in info
+		category = tuple[1]
+		column = tuple[2]
+		for i in 1:size(category)[1]
+			element = category[i,column]
+			if eltype(element) == Int32
+				forward_dict[element] = index
+				backward_dict[index] = element
+			end
+			index += 1	
+		end
+	end
+	return_dict = Dict("forward" => forward_dict, "backward" => backward_dict)
+	return return_dict
+end
+
+function createRelationshipDict(info::Array)
+	return_dict = Dict()
+	for i in 1:size(info)[1]
+		node1 = info[i,1]
+		relationship = info[i,2]
+		node2 = info[i,3]
+		info_list = [(relationship, node2)]
+		if haskey(return_dict, node1)
+			current_list = return_dict[node1]
+			return_dict[node1] = [current_list; info_list]
+			
+		else
+			return_dict[node1] = info_list
+		end
+	end
+	return return_dict
+end		
+
+
+
+##now we can use the matrix_dict in combination with the relationship array to create the
+##sparse matrix
+
+function createPanamaMatrix(relationships::Array, number_dict::Dict{Int64, Int64})
+	#this is super hacky, will have to ask Jiahao about this later
+	row = [3]
+	column = [3]
+	value = [3.0]
+	pop!(row)
+	pop!(column)
+	pop!(value)
+	for i in 1:size(relationships)[1]
+		node1 = relationships[i, 1]
+		node2 = relationships[i, 3]
+		if eltype(node1) == Int32 && eltype(node2) == Int32
+			if haskey(number_dict, node1) && haskey(number_dict, node2)
+				push!(row, number_dict[node1])
+				push!(row, number_dict[node2])
+				push!(column,number_dict[node2])
+				push!(column,number_dict[node1])
+				push!(value, 1)
+				push!(value, 1)
+			end
+		end
+	end
+	a = sparse(row, column, value)
+	b = spones(a)
+	a = 0
+	return b
+end
+
+#will have to have a unique dictionary for every matrix, so could combine them into single
+#data structure
+type compressedSparseMatrix
+	matrix::SparseMatrixCSC{Float64,Int32}
+	dict::Dict{ASCIIString,Dict{Int64,Int64}}
+end
+
+function Base.show(io::IO, m::compressedSparseMatrix)
+	show(m.matrix)
+	print("\nHere, the indices shown in the sparse matrix maps to the following node id's,
+	where the dictionary is of form:")
+	print(summary(m.dict))
+end
+
+#now we need an extract row method, this assumes two dimensional array
+function extractRow(info::Array, index = Int32)
+	return_array = []	
+	length = size(info)[1]
+	width = size(info)[2]
+	row_extract = index%length
+	push!(return_array,info[row_extract])
+	for multiplier = 1:(width-1)
+		push!(return_array, info[row_extract+length*multiplier])
+	end
+	return_array
+	show(return_array)
+end
+
+
+############################################################################################################
+######################################## Setup #############################################################
+############################################################################################################
+
+#this sets up data structures that will be used throughout
+
+addresses = readcsv("C:\\Users\\Mark\\Desktop\\offshore_leaks_csvs-20160524\\Addresses.csv")
+entities = readcsv("C:\\Users\\Mark\\Desktop\\offshore_leaks_csvs-20160524\\Entities.csv")
+inter = readcsv("C:\\Users\\Mark\\Desktop\\offshore_leaks_csvs-20160524\\Intermediaries.csv")
+officers = readcsv("C:\\Users\\Mark\\Desktop\\offshore_leaks_csvs-20160524\\Officers.csv")
+
+relationships = readcsv("C:\\Users\\Mark\\Desktop\\offshore_leaks_csvs-20160524\\all_edges.csv")
+
+entities_dict = createDict([(entities, determineColumn(entities))])
+		
+relationship_dict = createRelationshipDict(relationships)
+inter_dict = createDict([(inter, determineColumn(inter))])
+officers_dict = createDict([(officers, determineColumn(officers))])
+
+entities_matrix = compressedSparseMatrix(createPanamaMatrix(relationships, entities_dict["forward"]), entities_dict)
+entities_dict = 0
+
+
+############################################################################################################
+######################################## Investigation #####################################################
+############################################################################################################
+
+#this set of data basically contains code to look for usable relationships
+	
+#let see what kind of relationships exists between just entities
+entities_relationships = Dict()
+for i = 1:size(relationships)[1]
+	node1 = relationships[i,1]
+	if haskey(entities_matrix.dict["forward"],node1)
+		if haskey(entities_matrix.dict["forward"], relationships[i,3])
+			if haskey(entities_relationships, relationships[i,2])
+				entities_relationships[relationships[i,2]] = [entities_relationships[relationships[i,2]];[(node1,relationships[i,3])]]
+			else
+				entities_relationships[relationships[i,2]] = [(node1, relationships[i,3])]
+			end
+		end
+	end
+end
+
+#the relationships are: "related entity" and "same name and registration date as"
+entities_relationships = 0
+
+addresses_dict = createDict([(addresses, determineColumn(addresses))])
+
+#let see what kind of relationships exists between just addresses
+addresses_relationships = Dict()
+for i = 1:size(relationships)[1]
+	node1 = relationships[i,1]
+	if haskey(addresses_dict["forward"],node1)
+		if haskey(addresses_dict["forward"], relationships[i,3])
+			if haskey(addresses_relationships, relationships[i,2])
+				addresses_relationships[relationships[i,2]] = [addresses_relationships[relationships[i,2]];[(node1,relationships[i,3])]]
+			else
+				addresses_relationships[relationships[i,2]] = [(node1, relationships[i,3])]
+			end
+		end
+	end
+end
+
+#the only relationships within addresses are: "same address as"
+addresses_relationships = 0
+
+#basically right now, we have some interesting information involving entities. Will try to find a better way to parse it. In addition
+#do not know about the benefits of SVD and if it is relevant at all to the project. Perhaps, the singular values can tell 
+
+#let us do analysis based on address and entities, we want to ultimately map to numbers the numbers of companies at same address
+#first let us map companies to address
+address_entities_relationships = Dict()
+for i = 1:size(relationships)[1]
+	entity = relationships[i,1]
+	address = relationships[i,3]
+	if haskey(addresses_dict["forward"], address)
+		if haskey(entities_matrix.dict["forward"],entity)
+			if haskey(address_entities_relationships, relationships[i,2])
+				address_entities_relationships[relationships[i,2]] = 
+				[address_entities_relationships[relationships[i,2]];[(entity,address)]]
+			else
+				address_entities_relationships[relationships[i,2]] = [(entity, address)]
+			end
+		
+		else
+
+			if haskey(address_entities_relationships, string(relationships[i,2],"2"))
+				address_entities_relationships[string(relationships[i,2],"2")] = 
+				[address_entities_relationships[string(relationships[i,2],"2")];[(entity,address)]]
+			else
+				address_entities_relationships[string(relationships[i,2],"2")] = [(entity, address)]
+			end
+		end
+	end	
+end
+
+#the only relationships involving an entity and address is "registered address", however, there also exists "same address as" which is between two addresses
+#and another "registered address" but this one either involving intermediaries or officers
+
+#we will still be using address_entities_relationships for a while
+
+
+#show all different relations in relationships
+relationship_types = Dict()
+for i = 1:size(relationships)[1]
+	relationship = relationships[i,2]
+	if !haskey(relationship_types, relationship)
+		relationship_types[relationship] = 1
+	else
+		relationship_types[relationship] +=1
+	end
+end
+
+#going to keep this since there are many different relations
+
+#show all different relations involving address
+address_relationship_types = Dict("first" => Dict(), "second" => Dict())
+
+for i = 1:size(relationships)[1]
+	relationship = relationships[i,2]
+	if haskey(addresses_dict["forward"], relationships[i,1])
+		if !haskey(address_relationship_types["first"], relationship)
+			address_relationship_types["first"][relationship] = 1
+		else
+			address_relationship_types["first"][relationship] +=1
+		end
+
+	elseif haskey(addresses_dict["forward"], relationships[i,3])
+		if !haskey(address_relationship_types["second"], relationship)
+			address_relationship_types["second"][relationship] = 1
+		else
+			address_relationship_types["second"][relationship] +=1
+		end
+	end
+end
+
+#this only gives the added information that the only situation where the address in first in a relationship is 
+#if the relationship is "same address as", otherwise, the other relationship is "registered addresss"
+
+***one thing of note is that there are 7 elements with "same address as" which do not regard the first element as an address***
+***one possible explanation is that address did not get completely imported, and those addresses are missing ***
+
+address_relationship_types = 0
+
+	
+#now the idea is to go through the list of registered address to find common addresses
+intermediary_dict = Dict()
+for tuple in address_entities_relationships["registered address"]
+	if haskey(intermediary_dict, tuple[1])
+		intermediary_dict[tuple[1]] +=1
+	else
+		intermediary_dict[tuple[1]] = 1
+	end
+end
+
+histogram_dict = Dict()
+for i = values(intermediary_dict)
+	if haskey(histogram_dict, i)
+		histogram_dict[i] += 1
+	else
+		histogram_dict[i] = 1
+	end
+end
+
+intermediary_dict = 0
+#From the result, we see that the results are as nothing special. For example, there are 87695 addresses which only have one company
+#in it, 2367 addresses which has two companies, 13 addresses which has 3 companies, 1 address which has 4 companies and that's it
+
+histogram_dict = 0
+
+#now we will check for sole shareholder
+sole_shareholder = Dict()
+for i = 1:size(relationships)[1]
+	if relationships[i,2] == "Sole shareholder of"
+		if haskey(sole_shareholder, relationships[i,1])
+			sole_shareholder[relationships[i,1]] = 
+			[sole_shareholder[relationships[i,1]]; [relationships[i,3]]]
+		else
+			sole_shareholder[relationships[i,1]] = [relationships[i,3]]
+		end
+	end
+end
+
+#once again, the results do not seem too significant, there are only 4 such relationships
+
+#now let us create a laplacian, which involves subtracting the adjacency matrix from 
+#a degree matrix. For degree matrix, will count both in and out edges, as the 
+#relationships which the edges represent are contrived and can easily be the opposite
+#For now, we are only looking for primarily relationships involving entities
+
+entities_addresses_dict = createDict([(entities, determineColumn(entities)), (addresses, determineColumn(addresses))])
+inter_count = Dict()
+entities_addresses_matrix = compressedSparseMatrix(createPanamaMatrix(relationships, entities_addresses_dict["forward"]), entities_addresses_dict)
+for i = 1:size(relationships)[1]
+	if haskey(entities_addresses_matrix.dict["forward"],relationships[i,1])
+		if haskey(inter_count, relationships[i,1])
+			inter_count[relationships[i,1]] +=1
+		else
+			inter_count[relationships[i,1]] = 1
+		end
+	end
+
+	if haskey(entities_addresses_matrix.dict["forward"], relationships[i,3])
+		if haskey(inter_count, relationships[i,3])
+			inter_count[relationships[i,3]] +=1
+		else
+			inter_count[relationships[i,3]] = 1
+		end
+	end
+end
+
+inversematrix = spzeros(size(entities_addresses_matrix.matrix)...) - entities_addresses_matrix.matrix
+values= [3]
+pop!(values)
+for i = 1:size(entities_addresses_matrix.matrix)[1]
+	if haskey(entities_addresses_matrix.dict["backward"], i)
+		nodevalue = entities_addresses_matrix.dict["backward"][i]
+		if haskey(inter_count, nodevalue)
+			push!(values,inter_count[nodevalue])
+		else
+			push!(values,0)
+		end
+	else
+		push!(values,0)
+	end
+end
+
+diagonalmatrix = sparse([i=1:length(values)], [i=1:length(values)], values)
+laplacianmatrix = inversematrix + diagonalmatrix
+using IterativeSolvers
+svdl(laplacianmatrix, 10)
+
+############################################################################################################
+######################################## Analysis ##########################################################
+############################################################################################################	
+
+
+#let's make a dictionary of the addresses of the entity matrix, looking for unique keys and if they are found count the number of companies associated with the keys
+addressCount = Dict()	
+
+columnNumber = determineColumn(entities, "address")
+for i = 2:size(entities)[1]
+	if haskey(addressCount, entities[i,columnNumber])
+		addressCount[entities[i,columnNumber]] +=1
+	else
+		addressCount[entities[i,columnNumber]] = 1
+	end
+end
+
+addressCountBack = Dict()
+for i = keys(addressCount)
+	if haskey(addressCountBack, addressCount[i])
+		addressCountBack[addressCount[i]] = [addressCountBack[addressCount[i]];i]
+	else
+		addressCountBack[addressCount[i]] = [i]
+	end
+end
+	
+address_histogram_dict = Dict()
+for i = keys(addressCount)
+	if haskey(address_histogram_dict, addressCount[i])
+		address_histogram_dict[addressCount[i]] += 1
+	else
+		address_histogram_dict[addressCount[i]] = 1
+	end
+end
+x = []
+y = []
+for i = keys(address_histogram_dict)
+	push!(x, i)
+	push!(y, address_histogram_dict[i])
+end
+
+x2 = []
+y2 = []
+for i = 1:round(Int,10^2.322751)
+	push!(x2, i)
+	push!(y2, 10^(3.84701-1.65623*log(10,i)))
+end
+
+x3 = []
+y3 = []
+for i = 1:round(Int, 10^3.0062855)
+	push!(x3,i)
+	push!(y3, 10^(0.999617-0.332509*log(10,i)))
+end
+
+using PyPlot
+
+x = map(first,sort(collect(address_histogram_dict)))
+y = map(last, sort(collect(address_histogram_dict)))
+ax = axes()
+ax[:plot](x,y)
+ax[:set_xscale]("log")
+ax[:set_yscale]("log")
+
+
+#based on the formulas that we have determined, also plot line segments we found
+ax[:plot](x2,y2)
+ax[:plot](x3,y3)
+plt[:show]()
+
+#From this graph, we see that for the most part, there is a double log relationship
+#in which there seems to be a linear relationship when both x-axis and y-axis on log scale
+#furthermore, there is also a fat tail. 
+
+#We will do two different analysis to determine outliers, and compare the results. One would
+#be a modified thompson tau test. However, since we expect the result to be of logarithmic
+#nature, we will be taking the log(10) of such numbers. The other test is attempt to make a
+#linear regression. We may have to take two lines, one for the majority of the data and the
+#other for the tail
+
+#For linear regression, let'suse a package as it is easier than making regression
+logx = [3.0]
+logy = [3.0]
+pop!(logx)
+pop!(logy)
+for i in x
+	push!(logx, log(10,i))
+end
+for j in y
+	push!(logy, log(10,j))
+end
+
+using DataFrames
+using GLM
+
+logData = DataFrame(X=logx[1:80], Y=logy[1:80])
+OLS = glm( Y ~ X, logData, Normal(), IdentityLink())
+
+#based on a linear regression without tail, we have formula of 
+#Y = 3.84701- 1.65623x, meaning points beyond 2.32275 are outliers
+#(this is using natural log instead of log10)
+
+#Using eye estimate, believe tail start at around 1.9
+cutLogData = DataFrame(X=logx[80:end], Y = logy[80:end])
+cutOLS = glm( Y ~ X, cutLogData, Normal(), IdentityLink())
+
+#this time we have a graph with a y-intercept of 0.999617 and a slope of -0.332509
+#which implies that points beyond 3.0062855 are outliers
+
+
+
+#first, to get better look at data, let us see the top 10 locations of addresses
+#with most companies
+
+#at 33841, we have "Portcullis TrustNet Chambers P.O. Box 3444 Road Town, Tortola, British Virgin Islands
+#at 19863, we have ""
+#at 7012, we have Orion House Services Limited Room 1401; 14/F.; World Commerce Centre; Harbour City; 7-11 Canton Road; Tsim Sha Tsui; Kowloon; Hong Kong
+#at 5697, we have Unitrust Corporate Services Ltd. John Humphries House, Room 304 4-10 Stockwell Street, Greenwhich London
+#at 4349, we have Mossack Fonseca And Co. Mossfon Building Calle 54 este Panama, Republic de Panama
+#at 4117, we have MF Associates Inc. Pasea Roberta Monte Capital Plaza; Floor 8 Costa Del Este; Panma Republic of Panama
+#at 4094, we have "Offshorher Business SErvices LD. Unit 286, 8/F Ocrean Centre; Harbour City; 5 Canton Road; Tst Kowloo; Hong Kong
+#at 3896, we have sealight Incorporation Limited Room 1201, Connaught Commercial Building 18s Wanchant Rod Whanchai, Hong Kong
+#at 3885, we have Mossack Fonsesca and Co. PTE LTD. 19 Keppel Road #03-05, 3RD storey Jit Poh Building Singapore
+#at 3157, we hve Consulo International Limited Rad Al Khaimah Free Zone Trade Ras s Whailmah United Arab Emirates
+ 
+
+#we see no discernable pattern within the data, though there re several of these addresses based in Hong Kong
+
+#given list of addresses, the next step would be to parse country. In order to do this, 
+#will have to create another dictionary from the entities matrix from address to country
+#in addition, can clear it afterwards
+
+#***********************************NOTE**************************************************#
+#can replace it later with a parsing algorithm, but only if such algorithm can also parse street or city
+
+
+address_country_dict = Dict()
+countriesIndex = determineColumn(entities, "countries")
+addressIndex = determineColumn(entities, "address")
+
+for i = 1:size(entities)[1]
+	if ! haskey(address_country_dict, entities[i,addressIndex])
+		countryList = []
+		countryString = entities[i, countriesIndex]
+		if contains(countryString, ";")
+			countryList = [countryList; split(countryString, ";")]
+		else
+			push!(countryList, countryString)
+		end
+		address_country_dict[entities[i, addressIndex]] = countryList
+	end
+end
+
+#start simple: 
+function companyAddressFinder(addressCountBack, cutoffNumber)
+	return_list = []
+	for i = keys(addressCountBack)
+		if i >= cutoffNumber
+			addressList = addressCountBack[i]
+			for address in addressList
+				if haskey(address_country_dict, address)
+			
+					return_list = [return_list;address_country_dict[address]]
+				end
+			end
+		end
+	end
+	return_list
+end
+
+function AddressFinder(addressCountBack, cutoffNumber)
+	return_list = []
+	for i = keys(addressCountBack)
+		if i >= cutoffNumber
+			addressList = addressCountBack[i]
+			for address in addressList
+
+				return_list = [return_list;address]
+
+			end
+		end
+	end
+	return_list
+end
+##########################################################################################
+##########################################################################################
+##Jiahao's code, will use to try to plot onto world map
+#Convert Shapefile rectangle to Compose rectangle
+using Compat
+using Compose
+using Gadfly
+using GitHub
+using HDF5, JLD
+using Interact
+using MetadataTools
+using JSON
+using ProgressMeter
+using Requests
+using Shapefile
+using URIParser
+
+dl(url::Nullable{URI}, filename, tries = 3) = 
+    if isnull(url)
+        throw(ArgumentError("Cannot dl($url)"))
+    else
+        dl(get(url), filename, tries)
+    end
+
+dl(url, filename, tries=3) = dl(URI(url), filename, tries)
+
+#Download data from a given URL to a file.
+function dl(url::URI, filename, tries = 3)
+    isfile(filename) && return #Don't overwrite existing files
+    r = nothing
+    for i=1:tries
+        try
+            r = get(url)
+            
+            r.status == 200 && break
+
+            if contains(r.headers["Content-Type"], "text/html")
+                display("text/html", r.data)
+            end
+            r.status == 302 && break #Redirection
+        catch e
+            warn(e)
+        end
+        sleep(3)
+    end
+    if r!=nothing && r.status == 200
+        open(filename, "w") do f
+            write(f, r.data)
+        end
+    else
+        warn("Could not download $url\nStatus: $(r.status)")
+    end
+end
+
+Compose.rectangle{T<:Real}(R::Shapefile.Rect{T}) = rectangle(R.left,R.top,R.right-R.left,R.bottom-R.top)
+
+#Compose polygons cannot be disjoint but Shapefile.Polygons can
+#Need to convert Shapefile.Polygon to list of Compose polygons
+function Base.convert(::Type{Vector{Compose.Form{Compose.PolygonPrimitive}}},
+        shape::Shapefile.Polygon)
+    points = Any[]
+    polygons=Any[]
+    currentpart=2
+    for (i,p) in enumerate(shape.points)
+        push!(points, p)
+        if i==length(shape.points) || (currentpart<=length(shape.parts) && i==shape.parts[currentpart])
+            push!(polygons, polygon([(p.x,p.y) for p in points]))
+            currentpart += 1
+            points = Any[]
+        end
+    end
+    polygons
+end
+
+Polygons(shape::Shapefile.Polygon) = convert(Vector{Compose.Form{Compose.PolygonPrimitive}}, shape)
+
+#Technically correct only for S=Shapefile.ESRIShape
+Polygons{S<:Shapefile.ESRIShape}(shapes::Vector{S}) = [[convert(Vector{Compose.Form{Compose.PolygonPrimitive}},
+    shape) for shape in shapes]...]
+
+#Load some data about the world's countries
+worldshapefile="ne_110m_admin_0_countries.shp"
+dl("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/110m_cultural/ne_110m_admin_0_countries.shp", worldshapefile)
+worldshape = open(worldshapefile) do f
+      read(f, Handle)
+end
+world=compose(context(), fill(nothing), stroke("black"), Polygons(worldshape.shapes)...)
+Gadfly.draw(SVG(8inch, 4inch), compose(context(units=UnitBox(-180, 90, 360, -180)), world))
+
+
+function getlatlon(location)
+	try
+        	responseosm = get(URI("http://nominatim.openstreetmap.org/search"),
+        	query=@compat Dict("format"=>"json", "q"=>location))
+        
+        	responseosmstr = bytestring(responseosm.data)
+        
+        	if responseosm.status!=200 && contains(responseosm.headers["Content-Type"], "text/html")
+            		display("text/html", responseosmstr)
+        	end
+        	meosm = JSON.parse(responseosmstr)
+        	if length(meosm)<1
+            		warn("OpenStreetMaps did not know the location of user with reported location \"$location\"")
+            		return (Inf, Inf, location) #Geocoder doesn't know where this is
+        	end
+        	#Return the first hit
+        	return (float(meosm[1]["lat"]), float(meosm[1]["lon"]), location)
+	catch e
+        	warn("Ignoring bad response from URL: http://nominatim.openstreetmap.org/search?format=json&q=$location")
+        	println("Error caught: ", e)
+        	if isdefined(:responseosm)
+            		if contains(responseosm.headers["Content-Type"], "text/html")
+                		display("text/html", responseosmstr)
+            		else
+                		println(responseosmstr)
+            		end
+        	end
+        	return nothing
+    	end
+end
+
+#########################################################################################
+########### NEED TO MODIFY THIS BASED ON DICTIONARIES ###################################
+#########################################################################################
+
+function adduserlocations!(locations)
+    xs = Float64[]; ys=Float64[]; rs=Any[]
+    locationPower = Dict()
+    for i in locations
+        location = getlatlon(i)
+	if !haskey(locationPower, i)
+	    locationPower[i] = (location[1], location[2],0.8mm)
+	else
+	    lholder = locationPower[i]
+	    locationPower[i] = (lholder[1,], lholder[2], lholder[3] + 0.15mm)
+
+	end
+    end
+    for i = keys(locationPower)
+        push!(xs, locationPower[i][2])
+        push!(ys, locationPower[i][1])
+        push!(rs, (1+sqrt(log(1)))*locationPower[i][3])
+    end
+
+    circle(xs, ys, rs)
+end
+
+
+
+
+
+function drawmap(left::Real=-180, right::Real=180, up::Real=90, down::Real=-90,
+    composeobjs...; target = SVG(4inch*(right-left)/(up-down),4inch))
+    Compose.draw(target,
+    compose(context(units=UnitBox(left,up,right-left,down-up)), world, composeobjs...))
+
+    #Print users in the box
+    #for (user, loc) in locations
+    #    if down<loc[1]<up && left<loc[2]<right
+    #        println(user, ":", loc)
+    #    end
+    #end
+end
+
+devs=compose(context(), fill("#d66661"), stroke("#c93d39"), linewidth(0.3mm),
+        adduserlocations!(companyAddressFinder(addressCountBack,1000)))
+
+drawmap(-180, 180, 90, -90, devs, target = SVG("finalmap.svg", 8inch, 4inch))
+
+# We can look at addresses of shareholders/intermediaries/officers, while determing this,
+#will need to differentiate betweens officers and intermediaries
+
+#peek at relationship list and look for some relationships which believe is interesting
+#another possibility is to look at the old/new names of companies. For example, there
+#could be a company which used to be named something else, which is another company in list
+
+#However, first it will be useful to revisit the addresses, and parse in more detail, now we
+#go to the city level
+
+a = AddressFinder(addressCountBack, 1000)
+cityList = ["Luxembourg City, Luxembourg", "Ras Al Khaimah, United Arab Emirates", "Geneva, Switzerland",
+"Hong Kong", "Hong Kong", "Panama city,Republic of Panama", "Apia, Samoa", "Tortola, British Virgin Islands", 
+"Amman, Jordan", "Riga, Latvia", "Ras Al Khaimah, United Arab Emirates", "Nassau, Bahamas",
+"Moscow, Russia", "Taiwan", "Riga, Latvia", "Moscow, Russia", "London", "Belize City, Belize",
+"Hitchin Hertfordshire, United Kingdom", "Apia, Samoa", "Hong Kong", "Nassau, Bahamas", "Limassol, Cyprus",
+"Hong Kong", "Dublin, Ireland", "Hong Kong", "Panama City, Republic of Panama", "Hong Kong", "Hong Kong",
+"Republic of Singapore", "Hong Kong", "Panama City, Republic of Panama"]
+devs=compose(context(), fill("#d66661"), stroke("#c93d39"), linewidth(0.3mm),
+        adduserlocations!(cityList))
+
+drawmap(-180, 180, 90, -90, devs, target = SVG("1000cityMap.svg", 8inch, 4inch))
+
+
+#Our next step is to try to create an automatic city parser. This can be done by first
+#creating a dictionary with existing capitals, this way can find capitals again after done
+
+cityDict = Dict()
+cityDict["moscow"] = ["moscow, russia"]
+cityDict["dublin"] = ["dublin, ireland"]
+cityDict["luxembourg"] = ["luxembourg city, luxembourg"]
+cityDict["geneva"] = ["geneva, switzerland"]
+cityDict["ras"] = ["al", "khaimah", "ras al khaimah, united arab emirates"]
+cityDict["hong"] = ["kong", "hong kong"]
+cityDict["panama"] = ["panama city, republic of panama"]
+cityDict["apia"] = ["apia, samoa"]
+cityDict["tortola"] = ["tortola, british virgin islands"]
+cityDict["amman"] = ["amman, jordon"]
+cityDict["riga"] = ["riga, latvia"]
+cityDict["nassau"] = ["nassau, bahamas"]
+cityDict["taiwan"] = ["taiwan"]
+cityDict["london"] = ["london"]
+cityDict["belize"] = ["belize"]
+cityDict["hitchin"] = ["hertfordshire", "hitchin hertfordshire, United Kingdom"]
+cityDict["limassol"] = ["limassol, cyprus"]
+cityDict["singapore"] = ["singapore"]
+
+#**Also make sure to ignore any number**#
+ignoreDict = Dict()
+ignoreDict[""] = 1
+ignoreDict["of"] = 1
+ignoreDict["republic"] = 1
+ignoreDict["people's"] = 1
+ignoreDict["*s.i.*"] = 1
+
+
+
+#once we have the start of the dictionary, we can start scanning through addresses word by word
+#if the addresses does not have a proper city, then we need to run method to try to determine 
+#possible city and return it as output
+
+#improve readability, optimally, we also want to write file containing information about cities, keeping this in permanent memory, most likely keep city on line
+cd("panama_papers")
+function parseCountry(address)
+	if haskey(address_country_dict, address)
+		addressList = address_country_dict[address]
+		if length(addressList) > 1
+			for element in addressList
+				if lowercase(element) != "british virgin islands" && element != "not identified"
+					return element
+				end
+			end
+		else
+			return addressList[1]
+		end
+	end
+	return ""
+end
+
+
+cityList = []
+count = 1
+for i = keys(address_country_dict)
+#for i = keys(a)
+	count += 1
+	print("count : $count \n")
+	finished = false
+	splitstring = lowercase(i)
+	#print("splitstring: $splitstring \n")
+	interArray = split(splitstring, [',', ' ', ';'])
+	#print("interArray: $interArray \n")
+	nextArray = []
+	for j = 1:length(interArray)
+		element =interArray[j]
+		#print("element: $element \n")
+		finished = false
+		if haskey(cityDict, element) && length(cityDict[element]) == 1
+				push!(cityList, cityDict[element][1])
+				finished = true
+				break
+
+		elseif !haskey(ignoreDict, element) && !isnumber(element)
+			push!(nextArray, element)
+		end
+	end
+	#print("CHECKPOINT: FINISHED FIRST HALF \n")
+	if finished == false
+		for j = 1:length(nextArray)
+			element = nextArray[j]
+			#print("element: $element \n")
+			found = true
+			if haskey(cityDict, element)
+				for k = 1:length(cityDict[element])-1
+					if j+k > length(nextArray) || nextArray[j+k] != cityDict[element][k]
+						found = false
+						end
+					end
+				if found == true
+					push!(cityList, cityDict[element][length(cityDict[element])])
+					finished = true
+					break
+				end
+			end
+		end
+		country = parseCountry(i)
+		if finished == false
+			city = ""
+			if length(nextArray) > 1
+				city = nextArray[length(nextArray)-1]
+				print("Is the capital of $splitstring equal to $city, $country? Y/N or just press enter to skip \n or \"end\" to end loop")
+			else
+				city = nextArray[length(nextArray)]
+				print("Is the capital of $splitstring equal to $city, $country? Y/N or just press enter to skip\n or \"end\" to end loop")
+			end
+				
+			input = chomp(readline())
+			while lowercase(input) != "y" && lowercase(input) != "n" && lowercase(input) != "" && lowercase(input) != "end"
+				print("Please respond with a \"y\" or \"n\" \n")
+				input = chomp(readline())
+			end
+
+			if lowercase(input) == "y"
+				cityDict[lowercase(city)] = ["$(lowercase(city)), $(lowercase(country))"]
+				push!(cityList, "$(lowercase(city)), $(lowercase(country))")
+
+			elseif lowercase(input) == "n"
+				print("Please write down correct city \n")
+				city = chomp(readline())
+				print("Please write down correct country \n")
+				country = chomp(readline())
+				push!(cityList, "$(lowercase(city)), $(lowercase(country))")
+				cityDict[lowercase(city)] = ["$(lowercase(city)), $(lowercase(country))"]
+			elseif lowercase(input) == "end"
+				break
+			end
+		end
+	end
+end
+	
+
+
+
+#from this information, we now need to parse by hand. Thus we show the list and begin
+
+
+
+#another possibility is looking for people who hold multiple positions within a company,
+#such as director, president, legal advisor, etc. Can do this by iterating through 
+#relationship and creating a dictionary which maps every person-entity relationship
+
+#before that, let us look at what relationships have entity as first element and what
+#relationships have people as first element
+
+people_entity_relationships = Dict("entities_first" => Dict(), "people_first" => Dict())
+
+for i = 1:size(relationships)[1]
+	if haskey(entities_matrix.dict["forward"],relationships[i,1])
+		if haskey(inter_dict["forward"], relationships[i,3]) || haskey(officers_dict["forward"], relationships[i,3])
+			secondDict = people_entity_relationships["entity_first"]
+			if !haskey(secondDict, relationships[i,2])
+				people_entity_relationships["entity_first"][relationships[i,2]] = 1
+			end
+		end
+	end
+end
+
+#there are 0 relationships which have entities as the first element and people as the second
+
+for i = 1:size(relationships)[1]
+	if haskey(entities_matrix.dict["forward"],relationships[i,3])
+		if haskey(inter_dict["forward"], relationships[i,1]) || haskey(officers_dict["forward"], relationships[i,1])
+			secondDict = people_entity_relationships["people_first"]
+			if !haskey(secondDict, relationships[i,2])
+				people_entity_relationships["people_first"][relationships[i,2]] = 1
+			end
+		end
+	end
+end
+
+#there are 70 different relationships which have people as the first element and entities as the second
+
+#the next step is to create two more dictionaries: one mapping each person (in terms of nodes)
+#to roles of the person and the other a two-sided dictionary mapping each person to how many roles
+#and number of roles to list of people
+
+person_role_dict = Dict()
+for i = 1:size(relationships)[1]
+	if haskey(inter_dict["forward"], relationships[i,1]) || haskey(officers_dict["forward"], relationships[i,1])
+		if haskey(entities_matrix.dict["forward"], relationships[i,3])
+			if !haskey(person_role_dict, relationships[i,1])
+				person_role_dict[relationships[i,1]] = [(relationships[i,2], relationships[i,3])]
+			else
+				person_role_dict[relationships[i,1]] = [person_role_dict[relationships[i,1]];(relationships[i,2], relationships[i,3])]
+			end
+		end
+	end
+end
+
+person_number_dict = Dict("forward" => Dict(), "backward" => Dict())
+for i = keys(person_role_dict)
+	person_number_dict["forward"][i] = length(person_role_dict[i])
+end
+for i = keys(person_number_dict["forward"])
+	if !haskey(person_number_dict["backward"], person_number_dict["forward"][i])
+		person_number_dict["backward"][person_number_dict["forward"][i]] = [i]
+	else
+		person_number_dict["backward"][person_number_dict["forward"][i]] = [person_number_dict["backward"][person_number_dict["forward"][i]];i]
+	end
+end
+a = collect(keys(person_number_dict["backward"]))
+sort!(a)
+
+#from the data, we see that the majority of people only have one role (286718 out of 364977)
+#however, there is also high variance in the number of intermediaris and officersthat also
+#have a role as the number of roles that a person have can become as high as 36365. 
+
+#I believe the next step is to look at the companies of the one with the roles in the 36365
+#companies. I believe that they might all belong to the same address or something of that 
+#nature so he might be sort of an "accomplice" or something
+
+#first we need to make a dictionary between entity nodes and also addresses
+
+entitiesNode_address = Dict()
+node_column = determineColumn(entities)
+address_column = determineColumn(entities, "address")
+
+for i = 2:size(entities)[1]
+	entitiesNode_address[entities[i,node_column]]= entities[i, address_column]
+end
